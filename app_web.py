@@ -46,6 +46,16 @@ except ImportError:
     print("ERROR: requests not installed.")
     sys.exit(1)
 
+# Optional keyring for credential persistence (Windows Credential Manager)
+try:
+    import keyring
+    KEYRING_AVAILABLE = True
+except ImportError:
+    keyring = None
+    KEYRING_AVAILABLE = False
+    print("WARNING: keyring not installed. Credential persistence disabled.")
+    print("         Run: pip install keyring")
+
 # Custom modules
 engine = media = taxonomy = open_graph = ai_prompts = wp_client = None
 CUSTOM_MODULES = False
@@ -130,6 +140,7 @@ def get_session_data():
             "activity_log": [],
             "store": dict(STORE_DEFAULTS),
             "og_global": {},
+            "og_products": {},
             "blog_drafts": [],
             "ai_responses": [],
             "taxonomy_cache": {},
@@ -385,6 +396,18 @@ pre.prompt-box{background:#f0fdf4;border:2px solid var(--primary);padding:16px;
   .tab-btn .emoji{font-size:16px}
   .split{grid-template-columns:1fr}
 }
+
+.chips-container{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;min-height:28px}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:var(--primary-l);color:var(--primary);border-radius:14px;font-size:12px;font-weight:600}
+[data-theme=dark] .chip{background:#14321e;color:#86efac}
+.chip-x{cursor:pointer;font-weight:700;font-size:14px;line-height:1}
+.chip-x:hover{color:var(--danger)}
+.attr-row{display:flex;gap:12px;align-items:center;margin-bottom:10px;padding:8px;background:var(--bg-elev);border-radius:6px}
+.attr-row label{flex-shrink:0;color:var(--text);font-weight:600}
+.attr-row input{flex:1}
+.image-thumb{width:100px;height:100px;border-radius:6px;border:2px dashed var(--border);background:var(--bg-elev);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted);overflow:hidden;flex-shrink:0}
+
+
 """
 
 
@@ -422,6 +445,22 @@ HTML_BODY = r"""
 
 <!-- ========== TAB 1: CONNECTIONS ========== -->
 <section class="tab-content active" id="tab-connections">
+    <div class="card" style="border-left:4px solid #f59e0b;">
+        <h2>🔑 Credential Persistence</h2>
+        <p class="text-muted mb-16">Save credentials securely using Windows Credential Manager. Auto-reconnects on app restart.</p>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px;">
+            <input type="checkbox" id="remember-creds" checked onchange="toggleRememberCreds()" style="width:auto;margin:0;">
+            <span><strong>Remember credentials</strong> &mdash; auto-connect on reload</span>
+        </label>
+        <div id="creds-status-banner" class="status info">
+            &trade; Checking saved credentials...
+        </div>
+        <div class="btn-row mt-16">
+            <button class="btn btn-sm btn-warn" onclick="forgetSavedCreds()">🗑️ Forget Saved Credentials</button>
+            <button class="btn btn-sm" onclick="checkSavedCreds()">🔄 Refresh Status</button>
+        </div>
+    </div>
+
     <div class="card">
         <h2>🔵 WordPress Connection</h2>
         <div class="form-row">
@@ -953,8 +992,8 @@ HTML_BODY = r"""
 <!-- ========== TAB 11: UNIVERSAL EDITOR ========== -->
 <section class="tab-content" id="tab-editor">
     <div class="card">
-        <h2>✏️ Universal Content Editor</h2>
-        <p class="text-muted mb-16">Edit live products or blog posts. Changes preview before publish.</p>
+        <h2>✏️ Universal Content Editor <span class="text-muted text-sm" style="font-weight:400">v2.0</span></h2>
+        <p class="text-muted mb-16">Edit live products or blog posts. All changes preview before saving.</p>
         <div class="form-row-2">
             <div class="form-row"><label>Content Type</label>
                 <select id="editor-type" onchange="toggleEditorType()">
@@ -965,27 +1004,199 @@ HTML_BODY = r"""
                 <select id="editor-item" onchange="loadEditorItem()"></select></div>
         </div>
         <button class="btn btn-info" onclick="loadEditorList()">🔄 Load List</button>
+        <span id="editor-load-status" class="text-muted" style="margin-left:12px"></span>
     </div>
-    <div class="card hidden" id="editor-form-card">
-        <h2>Editing: <span id="editor-item-name"></span></h2>
-        <div class="form-row"><label>Title / Name</label>
-            <input type="text" id="editor-title"></div>
-        <div class="form-row"><label>Content (HTML)</label>
-            <textarea id="editor-content" rows="10" style="font-family:Consolas,monospace;font-size:12px"></textarea></div>
-        <div class="form-row-2">
-            <div class="form-row"><label>Meta Title</label>
-                <input type="text" id="editor-meta-title" maxlength="60"></div>
-            <div class="form-row"><label>Meta Description</label>
-                <input type="text" id="editor-meta-desc" maxlength="160"></div>
+
+    <div id="editor-product-form" class="hidden">
+        <div class="card">
+            <h2>📦 <span id="prod-edit-name-display">Product</span> <span class="text-muted text-sm" id="prod-edit-id-display"></span></h2>
+            <div class="form-row-3">
+                <div class="form-row"><label>Name</label><input type="text" id="prod-edit-name"></div>
+                <div class="form-row"><label>SKU</label><input type="text" id="prod-edit-sku"></div>
+                <div class="form-row"><label>Status</label>
+                    <select id="prod-edit-status">
+                        <option value="draft">Draft</option>
+                        <option value="publish">Published</option>
+                        <option value="pending">Pending</option>
+                        <option value="private">Private</option>
+                    </select></div>
+            </div>
         </div>
-        <div class="btn-row">
-            <button class="btn" onclick="previewDiff()">👁️ Preview Changes</button>
-            <button class="btn btn-primary" onclick="saveEditorChanges()">💾 Publish Changes</button>
-            <button class="btn btn-danger" onclick="deleteEditorItem()">🗑️ Delete</button>
+
+        <div class="card">
+            <h2>💰 Pricing & Stock</h2>
+            <div class="form-row-3">
+                <div class="form-row"><label>Regular Price (Rs)</label><input type="number" id="prod-edit-regular-price" step="0.01" min="0"></div>
+                <div class="form-row"><label>Sale Price (Rs)</label><input type="number" id="prod-edit-sale-price" step="0.01" min="0"></div>
+                <div class="form-row"><label>Stock Quantity</label><input type="number" id="prod-edit-stock" step="1" min="0"></div>
+            </div>
+            <div class="form-row-2">
+                <div class="form-row"><label>Stock Status</label>
+                    <select id="prod-edit-stock-status">
+                        <option value="instock">In Stock</option>
+                        <option value="outofstock">Out of Stock</option>
+                        <option value="onbackorder">On Backorder</option>
+                    </select></div>
+                <div class="form-row" style="display:flex;align-items:flex-end;padding-bottom:10px">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
+                        <input type="checkbox" id="prod-edit-manage-stock" style="width:auto;margin:0">
+                        <span>Manage stock quantity</span>
+                    </label>
+                </div>
+            </div>
         </div>
-        <div class="hidden mt-16" id="editor-diff-box">
-            <h3>Changes Preview</h3>
-            <pre class="log" id="editor-diff-content" style="max-height:400px"></pre>
+
+        <div class="card">
+            <h2>📝 Content</h2>
+            <div class="form-row"><label>Short Description</label><textarea id="prod-edit-short-desc" rows="2"></textarea></div>
+            <div class="form-row"><label>Full Description (HTML)</label><textarea id="prod-edit-desc" rows="10" style="font-family:Consolas,monospace;font-size:12px"></textarea></div>
+        </div>
+
+        <div class="card">
+            <h2>🏷️ Categories, Tags & Brand</h2>
+            <div class="form-row">
+                <label>Categories</label>
+                <div class="chips-container" id="prod-edit-categories-chips"></div>
+                <input type="text" id="prod-edit-categories-input" list="categories-datalist" placeholder="Type + Enter to add category" onkeypress="if(event.key==='Enter'){event.preventDefault();addChipFromInput('categories')}">
+                <datalist id="categories-datalist"></datalist>
+            </div>
+            <div class="form-row">
+                <label>Tags</label>
+                <div class="chips-container" id="prod-edit-tags-chips"></div>
+                <input type="text" id="prod-edit-tags-input" list="tags-datalist" placeholder="Type + Enter to add tag" onkeypress="if(event.key==='Enter'){event.preventDefault();addChipFromInput('tags')}">
+                <datalist id="tags-datalist"></datalist>
+            </div>
+            <div class="form-row">
+                <label>Brand</label>
+                <div class="chips-container" id="prod-edit-brand-chips"></div>
+                <input type="text" id="prod-edit-brand-input" list="brands-datalist" placeholder="Type + Enter to add brand" onkeypress="if(event.key==='Enter'){event.preventDefault();addChipFromInput('brand')}">
+                <datalist id="brands-datalist"></datalist>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>⚙️ Attributes</h2>
+            <div id="prod-edit-attributes-container"></div>
+            <p class="text-muted mt-8" style="font-size:11px">Comma-separated values. Example: 100ml, 200ml</p>
+        </div>
+
+        <div class="card">
+            <h2>🖼️ Images</h2>
+            <div class="form-row">
+                <label>Featured Image</label>
+                <div style="display:flex;gap:12px;align-items:center">
+                    <div id="prod-edit-featured-preview" class="image-thumb">No image</div>
+                    <div>
+                        <button class="btn btn-sm" onclick="changeFeaturedImage()">📷 Change</button>
+                        <button class="btn btn-sm btn-danger" onclick="removeFeaturedImage()">🗑️ Remove</button>
+                        <div class="text-muted text-sm mt-8" id="prod-edit-featured-id"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="form-row">
+                <label>Gallery Images</label>
+                <div id="prod-edit-gallery-container" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"></div>
+                <button class="btn btn-sm" onclick="addGalleryImage()">➕ Add Gallery Image</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🔍 SEO / Meta</h2>
+            <div class="form-row"><label>Focus Keyword</label>
+                <input type="text" id="prod-edit-focus-kw" placeholder="e.g. almond oil for hair"></div>
+            <div class="form-row"><label>Meta Title (max 60)</label><input type="text" id="prod-edit-meta-title" maxlength="60"></div>
+            <div class="form-row"><label>Meta Description (max 160)</label><textarea id="prod-edit-meta-desc" rows="2" maxlength="160"></textarea></div>
+        </div>
+
+        <div class="card">
+            <div class="btn-row">
+                <button class="btn" onclick="previewProductChanges()">👁️ Preview</button>
+                <button class="btn btn-primary btn-lg" onclick="saveProductChanges()">💾 Save Changes</button>
+                <button class="btn btn-danger" onclick="deleteCurrentItem()">🗑️ Delete Product</button>
+            </div>
+            <div id="product-diff-box" class="hidden mt-16">
+                <h3>Changes Preview</h3>
+                <pre class="log" id="product-diff-content" style="max-height:400px"></pre>
+            </div>
+        </div>
+    </div>
+
+    <div id="editor-post-form" class="hidden">
+        <div class="card">
+            <h2>📰 <span id="post-edit-title-display">Blog Post</span> <span class="text-muted text-sm" id="post-edit-id-display"></span></h2>
+            <div class="form-row"><label>Title</label>
+                <input type="text" id="post-edit-title"></div>
+            <div class="form-row-2">
+                <div class="form-row"><label>Status</label>
+                    <select id="post-edit-status">
+                        <option value="draft">Draft</option>
+                        <option value="publish">Publish</option>
+                        <option value="pending">Pending</option>
+                        <option value="private">Private</option>
+                    </select></div>
+                <div class="form-row"><label>Slug</label>
+                    <input type="text" id="post-edit-slug" placeholder="auto from title"></div>
+            </div>
+            <div class="form-row"><label>Excerpt</label>
+                <textarea id="post-edit-excerpt" rows="2"></textarea></div>
+            <div class="form-row"><label>Focus Keyword</label>
+                <input type="text" id="post-edit-focus-kw" placeholder="e.g. herbal remedies for hair"></div>
+            <div class="form-row"><label>Content (HTML)</label>
+                <textarea id="post-edit-content" rows="12" style="font-family:Consolas,monospace;font-size:12px"></textarea></div>
+        </div>
+
+        <div class="card">
+            <h2>🏷️ Categories & Tags</h2>
+            <div class="form-row">
+                <label>Categories</label>
+                <div class="chips-container" id="post-edit-categories-chips"></div>
+                <input type="text" id="post-edit-categories-input" list="wp-categories-datalist" placeholder="Type + Enter to add category" onkeypress="if(event.key==='Enter'){event.preventDefault();addChipFromInput('categories')}">
+                <datalist id="wp-categories-datalist"></datalist>
+            </div>
+            <div class="form-row">
+                <label>Tags</label>
+                <div class="chips-container" id="post-edit-tags-chips"></div>
+                <input type="text" id="post-edit-tags-input" list="wp-tags-datalist" placeholder="Type + Enter to add tag" onkeypress="if(event.key==='Enter'){event.preventDefault();addChipFromInput('tags')}">
+                <datalist id="wp-tags-datalist"></datalist>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🖼️ Featured Image</h2>
+            <div style="display:flex;gap:12px;align-items:center">
+                <div id="post-edit-featured-preview" class="image-thumb">No image</div>
+                <div>
+                    <button class="btn btn-sm" onclick="changePostFeaturedImage()">📷 Change</button>
+                    <button class="btn btn-sm btn-danger" onclick="removePostFeaturedImage()">🗑️ Remove</button>
+                    <div class="text-muted text-sm mt-8" id="post-edit-featured-id"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🔍 SEO / Meta</h2>
+            <div class="form-row"><label>Meta Title (max 60)</label>
+                <input type="text" id="post-edit-meta-title" maxlength="60"></div>
+            <div class="form-row"><label>Meta Description (max 160)</label>
+                <textarea id="post-edit-meta-desc" rows="2" maxlength="160"></textarea></div>
+        </div>
+
+        <div class="card">
+            <div class="btn-row">
+                <button class="btn" onclick="previewPostChanges()">👁️ Preview Changes</button>
+                <button class="btn btn-primary btn-lg" onclick="savePostChanges()">💾 Save Changes</button>
+                <button class="btn btn-danger" onclick="deleteCurrentItem()">🗑️ Delete Post</button>
+            </div>
+            <div id="post-diff-box" class="hidden mt-16">
+                <h3>Changes Preview</h3>
+                <pre class="log" id="post-diff-content" style="max-height:400px"></pre>
+            </div>
+        </div>
+    </div>
+
+    <div id="editor-empty-state">
+        <div class="card">
+            <p class="text-muted">Select content type, click "Load List", then select an item.</p>
         </div>
     </div>
 </section>
@@ -1200,6 +1411,101 @@ function onTabActivate(tab){
     if (tab === 'editor') loadEditorList();
 }
 
+// ================================================================
+// CREDENTIAL PERSISTENCE
+// ================================================================
+async function checkSavedCreds(){
+    const banner = document.getElementById('creds-status-banner');
+    if (!banner) return;
+    try {
+        const d = await api('/api/credentials/status', {method:'GET'});
+        if (!d.ok){
+            banner.className = 'status err';
+            banner.textContent = '❌ Status check failed: ' + (d.error || 'unknown');
+            return;
+        }
+        if (!d.keyring_available){
+            banner.className = 'status warn';
+            banner.textContent = '⚠️ keyring not installed. Run: pip install keyring';
+            return;
+        }
+        const parts = [];
+        if (d.wp_saved) parts.push('WP: ' + (d.wp_url || '') + (d.wp_user ? ' (' + d.wp_user + ')' : ''));
+        if (d.wc_saved) parts.push('WC: ' + (d.wc_url || ''));
+        if (parts.length === 0){
+            banner.className = 'status info';
+            banner.textContent = 'ℹ️ No saved credentials';
+        } else {
+            banner.className = 'status ok';
+            banner.innerHTML = '✅ Saved credentials found<br><span class="text-sm" style="font-weight:400">' + parts.join(' • ') + '</span>';
+        }
+        if (d.wp_saved && d.wp_url) document.getElementById('wp-url').value = d.wp_url;
+        if (d.wc_saved && d.wc_url) document.getElementById('wc-url').value = d.wc_url;
+    } catch (e) {
+        banner.className = 'status err';
+        banner.textContent = '❌ Error: ' + e.message;
+    }
+}
+
+async function autoRestoreCreds(){
+    try {
+        const status = await api('/api/credentials/status', {method:'GET'});
+        if (!status.ok || !status.keyring_available) return;
+        if (!status.wp_saved && !status.wc_saved) return;
+        showLoading('Restoring saved connections...');
+        try {
+            const d = await api('/api/credentials/restore', {body:{}});
+            if (d.ok){
+                const restored = [];
+                if (d.wp) { setStatus('WP ✓'); restored.push('WP (' + (d.wp_name || '?') + ')'); }
+                if (d.wc) { setStatus('WC ✓'); restored.push('WC'); }
+                if (restored.length){
+                    toast('✅ Auto-restored: ' + restored.join(' • '), 'ok', 5000);
+                }
+                if (d.wp_error) toast('WP: ' + d.wp_error, 'warning', 6000);
+                if (d.wc_error) toast('WC: ' + d.wc_error, 'warning', 6000);
+            }
+        } finally {
+            hideLoading();
+        }
+    } catch (e) {
+        console.warn('Auto-restore failed', e);
+    }
+}
+
+async function toggleRememberCreds(){
+    const cb = document.getElementById('remember-creds');
+    const checked = cb.checked;
+    localStorage.setItem('remember_creds', checked ? 'true' : 'false');
+    if (!checked){
+        if (!confirm('Unchecking will clear all saved credentials. Continue?')){
+            cb.checked = true;
+            localStorage.setItem('remember_creds', 'true');
+            return;
+        }
+        await forgetSavedCreds(true);
+    }
+}
+
+async function forgetSavedCreds(silent){
+    if (!silent && !confirm('Remove saved credentials from Windows Credential Manager?')) return;
+    try {
+        const d = await api('/api/credentials/clear', {body:{}});
+        if (d.ok){
+            if (!silent) toast('✅ Saved credentials cleared');
+            const banner = document.getElementById('creds-status-banner');
+            if (banner){
+                banner.className = 'status info';
+                banner.textContent = 'ℹ️ No saved credentials';
+            }
+        } else {
+            toast(d.error || 'Failed to clear', 'error');
+        }
+    } catch (e) {
+        toast('Error: ' + e.message, 'error');
+    }
+}
+
 function toast(msg, type='ok', dur=4000){
     const c = document.getElementById('toasts');
     const el = document.createElement('div');
@@ -1239,6 +1545,34 @@ async function api(url, options={}){
 
 function openModal(id){ document.getElementById(id).classList.add('active'); }
 function closeModal(id){ document.getElementById(id).classList.remove('active'); }
+
+
+// ================================================================
+// GLOBAL LOADING OVERLAY
+// ================================================================
+function showLoading(msg){
+    msg = msg || 'Loading...';
+    let overlay = document.getElementById('global-loading-overlay');
+    if (!overlay){
+        overlay = document.createElement('div');
+        overlay.id = 'global-loading-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99998;display:flex;align-items:center;justify-content:center;color:#fff;font-size:16px;font-family:Segoe UI,sans-serif;flex-direction:column;gap:16px;backdrop-filter:blur(2px);';
+        overlay.innerHTML = '<div style="border:4px solid rgba(255,255,255,0.25);border-top-color:#4ade80;border-radius:50%;width:52px;height:52px;animation:_spinner 0.9s linear infinite"></div><div id="global-loading-msg">Loading...</div><style>@keyframes _spinner{to{transform:rotate(360deg)}}</style>';
+        document.body.appendChild(overlay);
+    }
+    document.getElementById('global-loading-msg').textContent = msg;
+    overlay.style.display = 'flex';
+}
+
+function hideLoading(){
+    const overlay = document.getElementById('global-loading-overlay');
+    if (overlay) overlay.style.display = 'none';
+}
+
+// Auto-hide loading on any fetch error
+window.addEventListener('error', hideLoading);
+window.addEventListener('unhandledrejection', hideLoading);
+
 
 // ================================================================
 // TAB 1: CONNECTIONS
@@ -1732,6 +2066,8 @@ function renderTaxonomyTable(){
     });
 }
 function openTaxCreateModal(){
+    _taxEditMode = 'create';
+    _taxEditId = null;
     document.getElementById('modal-tax-title').textContent = 'Create New ' + currentTaxType;
     document.getElementById('modal-tax-name').value = '';
     document.getElementById('modal-tax-slug').value = '';
@@ -1744,21 +2080,47 @@ function openTaxCreateModal(){
 async function submitTaxCreate(){
     const name = document.getElementById('modal-tax-name').value.trim();
     if (!name){ toast('Name is required', 'warning'); return; }
-    const d = await api('/api/taxonomy/create', {body:{
-        type: currentTaxType, name,
+    const payload = {
+        type: currentTaxType,
+        name,
         slug: document.getElementById('modal-tax-slug').value,
-        parent_id: parseInt(document.getElementById('modal-tax-parent').value) || 0,
         description: document.getElementById('modal-tax-description').value,
-    }});
+    };
+    if (currentTaxType === 'wc_categories' || currentTaxType === 'wp_categories'){
+        payload.parent_id = parseInt(document.getElementById('modal-tax-parent').value) || 0;
+    }
+    let d;
+    if (_taxEditMode === 'edit'){
+        payload.id = _taxEditId;
+        d = await api('/api/taxonomy/update', {body: payload});
+    } else {
+        d = await api('/api/taxonomy/create', {body: payload});
+    }
     if (d.ok){
-        toast('Created: ' + name);
+        toast(_taxEditMode === 'edit' ? '✅ Updated' : '✅ Created: ' + name);
         closeModal('modal-tax-create');
         refreshTaxonomy();
     } else {
         toast(d.error, 'error');
     }
 }
-function openTaxEditModal(id){ toast('Edit feature — coming in next update', 'info'); }
+let _taxEditMode = 'create';
+let _taxEditId = null;
+
+function openTaxEditModal(id){
+    const item = currentTaxItems.find(x => x.id === id);
+    if (!item){ toast('Item not found', 'warning'); return; }
+    _taxEditMode = 'edit';
+    _taxEditId = id;
+    document.getElementById('modal-tax-title').textContent = 'Edit ' + currentTaxType;
+    document.getElementById('modal-tax-name').value = item.name || '';
+    document.getElementById('modal-tax-slug').value = item.slug || '';
+    document.getElementById('modal-tax-description').value = item.description || '';
+    document.getElementById('modal-tax-parent').value = item.parent || 0;
+    document.getElementById('modal-tax-parent-row').style.display =
+        (currentTaxType === 'wc_categories' || currentTaxType === 'wp_categories') ? '' : 'none';
+    openModal('modal-tax-create');
+}
 function confirmTaxDelete(id){
     const item = currentTaxItems.find(x => x.id === id);
     document.getElementById('modal-delete-msg').textContent =
@@ -1781,6 +2143,7 @@ function switchOGTab(which){
     document.getElementById('og-product-panel').classList.toggle('hidden', which !== 'product');
     document.getElementById('og-generator-panel').classList.toggle('hidden', which !== 'generator');
     if (which === 'product' || which === 'generator') fillOGProductDropdown();
+    refreshOGPreview();
 }
 async function loadGlobalOG(){
     const d = await api('/api/og/get', {method:'GET'});
@@ -1814,18 +2177,81 @@ async function saveGlobalOG(){
     else toast(d.error, 'error');
 }
 function previewGlobalOG(){ updateOGPreview(); toast('Preview updated'); }
-function updateOGPreview(){
-    const site = document.getElementById('og-site-name').value || 'Site Name';
-    const title = document.getElementById('og-title').value || 'Title';
-    const desc = document.getElementById('og-description').value || 'Description';
-    const img = document.getElementById('og-image').value;
-    document.getElementById('og-preview-site').textContent = site.toUpperCase();
-    document.getElementById('og-preview-title').textContent = title;
-    document.getElementById('og-preview-desc').textContent = desc;
-    const box = document.getElementById('og-preview-img');
-    if (img){ box.style.backgroundImage = `url('${img}')`; box.textContent = ''; }
-    else { box.style.backgroundImage = ''; box.textContent = '(no image)'; }
+function getOGPreviewData(){
+    const activeTabEl = document.querySelector('[data-og-tab].active');
+    const activeTab = activeTabEl ? activeTabEl.dataset.ogTab : 'global';
+    const site = (document.getElementById('og-site-name')?.value || 'Khan Herbal Stores');
+    const globalTitle = document.getElementById('og-title')?.value || '';
+    const globalDesc = document.getElementById('og-description')?.value || '';
+    const globalImg = document.getElementById('og-image')?.value || '';
+    if (activeTab === 'product'){
+        return {
+            site,
+            title: document.getElementById('og-prod-title')?.value || globalTitle || '(product title)',
+            desc: document.getElementById('og-prod-description')?.value || globalDesc || '(product description)',
+            img: document.getElementById('og-prod-image')?.value || globalImg,
+        };
+    }
+    if (activeTab === 'generator'){
+        return {
+            site,
+            title: globalTitle || '(title)',
+            desc: globalDesc || '(description)',
+            img: window._lastGeneratedOG || globalImg,
+        };
+    }
+    return { site, title: globalTitle || '(title)', desc: globalDesc || '(description)', img: globalImg };
 }
+
+function refreshOGPreview(){
+    const data = getOGPreviewData();
+    const siteEl = document.getElementById('og-preview-site');
+    const titleEl = document.getElementById('og-preview-title');
+    const descEl = document.getElementById('og-preview-desc');
+    const box = document.getElementById('og-preview-img');
+    if (siteEl) siteEl.textContent = (data.site || 'SITE').toUpperCase();
+    if (titleEl) titleEl.textContent = data.title;
+    if (descEl) descEl.textContent = data.desc;
+    if (!box) return;
+    box.style.position = 'relative';
+    box.style.overflow = 'hidden';
+    box.style.background = '';
+    box.style.backgroundImage = '';
+    box.style.color = '';
+    box.style.fontSize = '';
+    box.style.display = 'block';
+    box.innerHTML = '';
+    console.log('[OG Preview] data.img =', data.img);
+    if (data.img){
+        const img = document.createElement('img');
+        img.alt = 'OG preview';
+        img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;display:block;';
+        img.onload = function(){ console.log('[OG Preview] Loaded:', data.img, img.naturalWidth + 'x' + img.naturalHeight); };
+        img.onerror = function(){
+            console.warn('[OG Preview] Failed:', data.img);
+            if (img.parentNode) img.parentNode.removeChild(img);
+            box.style.display = 'flex';
+            box.style.alignItems = 'center';
+            box.style.justifyContent = 'center';
+            box.style.background = '#fee2e2';
+            box.style.color = '#dc2626';
+            box.style.fontSize = '12px';
+            box.textContent = 'Image failed: ' + String(data.img).substring(0, 60);
+        };
+        box.appendChild(img);
+        img.src = data.img;
+    } else {
+        box.style.display = 'flex';
+        box.style.alignItems = 'center';
+        box.style.justifyContent = 'center';
+        box.style.color = 'var(--muted)';
+        box.style.fontSize = '13px';
+        box.textContent = '(no image URL)';
+    }
+}
+
+function updateOGPreview(){ refreshOGPreview(); }
+
 async function fillOGProductDropdown(){
     const d = await api('/api/products/list', {method:'GET'});
     ['og-product-select','og-gen-product'].forEach(id => {
@@ -1846,15 +2272,46 @@ async function loadProductOG(){
     const name = document.getElementById('og-product-select').value;
     if (!name) return;
     document.getElementById('og-product-form').classList.remove('hidden');
-    const d = await api('/api/og/product-auto', {body:{name}});
+    ['og-prod-title', 'og-prod-description', 'og-prod-image'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && !el._ogWired){
+            el.addEventListener('input', refreshOGPreview);
+            el._ogWired = true;
+        }
+    });
+    const d = await api('/api/og/product-get', {body:{name}});
     if (d.ok){
         document.getElementById('og-prod-title').value = d.og.title || '';
         document.getElementById('og-prod-description').value = d.og.description || '';
         document.getElementById('og-prod-image').value = d.og.image || '';
     }
+    refreshOGPreview();
 }
-async function saveProductOG(){ toast('Product OG saved (session)', 'info'); }
-async function resetProductOG(){ loadProductOG(); }
+async function saveProductOG(){
+    const name = document.getElementById('og-product-select').value;
+    if (!name){ toast('Select a product first', 'warning'); return; }
+    const d = await api('/api/og/product-save', {body:{
+        name,
+        title: document.getElementById('og-prod-title').value,
+        description: document.getElementById('og-prod-description').value,
+        image: document.getElementById('og-prod-image').value,
+    }});
+    if (d.ok){ toast('Product OG saved'); }
+    else { toast(d.error || 'Save failed', 'error'); }
+}
+async function resetProductOG(){
+    const name = document.getElementById('og-product-select').value;
+    if (!name){ toast('Select a product', 'warning'); return; }
+    await api('/api/og/product-reset', {body:{name}});
+    const d = await api('/api/og/product-get', {body:{name}});
+    if (d.ok){
+        document.getElementById('og-prod-title').value = d.og.title || '';
+        document.getElementById('og-prod-description').value = d.og.description || '';
+        document.getElementById('og-prod-image').value = d.og.image || '';
+    }
+    refreshOGPreview();
+    toast('Reset to auto-filled values', 'info');
+}
 async function generateOGImage(){
     const name = document.getElementById('og-gen-product').value;
     if (!name){ toast('Select product', 'warning'); return; }
@@ -1862,10 +2319,12 @@ async function generateOGImage(){
     toast('Generating...', 'info');
     const d = await api('/api/og/generate-image', {body:{name, style}});
     if (!d.ok){ toast(d.error, 'error'); return; }
+    window._lastGeneratedOG = d.url;
     document.getElementById('og-preview-box').innerHTML =
-        `<div class="og-preview"><div class="og-img" style="background-image:url('${d.url}');"></div>
-         <div class="og-body"><p class="text-muted">Generated (${style})</p></div></div>`;
-    toast('✅ OG image generated');
+        '<div class="og-preview"><div class="og-img" style="background-image:url(\'' + d.url + '\');background-size:cover;background-position:center;"></div>' +
+        '<div class="og-body"><p class="text-muted">Generated (' + style + ')</p></div></div>';
+    refreshOGPreview();
+    toast('OG image generated');
 }
 
 // ================================================================
@@ -1922,7 +2381,20 @@ async function submitBlogCreate(){
         toast(d.error, 'error');
     }
 }
-function editBlogPost(id){ toast('Edit feature — use Editor tab', 'info'); }
+function editBlogPost(id){
+    document.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+    const editorBtn = document.querySelector('[data-tab="editor"]');
+    if (editorBtn) editorBtn.classList.add('active');
+    document.getElementById('tab-editor').classList.add('active');
+    document.getElementById('main').scrollTop = 0;
+    document.getElementById('editor-type').value = 'post';
+    _editorState.type = 'post';
+    loadEditorList().then(() => {
+        document.getElementById('editor-item').value = id;
+        loadEditorItem();
+    });
+}
 function viewBlogPost(url){ if (url) window.open(url, '_blank'); }
 function confirmBlogDelete(id){
     document.getElementById('modal-delete-msg').textContent = `Delete blog post ID ${id}?`;
@@ -1964,7 +2436,20 @@ async function loadLiveProducts(){
     });
     document.getElementById('live-summary').textContent = `${d.products.length} products loaded`;
 }
-function editLiveProduct(id){ toast('Switch to Editor tab', 'info'); }
+function editLiveProduct(id){
+    document.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+    const editorBtn = document.querySelector('[data-tab="editor"]');
+    if (editorBtn) editorBtn.classList.add('active');
+    document.getElementById('tab-editor').classList.add('active');
+    document.getElementById('main').scrollTop = 0;
+    document.getElementById('editor-type').value = 'product';
+    _editorState.type = 'product';
+    loadEditorList().then(() => {
+        document.getElementById('editor-item').value = id;
+        loadEditorItem();
+    });
+}
 function confirmLiveDelete(id){
     document.getElementById('modal-delete-msg').textContent = `Permanently delete product ID ${id}?`;
     document.getElementById('modal-delete-confirm-btn').onclick = async () => {
@@ -1975,59 +2460,485 @@ function confirmLiveDelete(id){
     openModal('modal-confirm-delete');
 }
 
-// ================================================================
-// TAB 11: UNIVERSAL EDITOR
-// ================================================================
-function toggleEditorType(){ loadEditorList(); }
+// TAB 11: UNIVERSAL EDITOR v2.0
+let _editorState = {
+    type: 'product', id: null, item: null,
+    options: {categories:[], tags:[], attributes:[], brands:[]},
+    categories: [], tags: [], brands: [], attributes: [],
+    images: {featured: null, gallery: []},
+    focus_keyword: '',
+    original: null,
+};
+
+function toggleEditorType(){
+    _editorState.type = document.getElementById('editor-type').value;
+    loadEditorList();
+}
+
 async function loadEditorList(){
     const type = document.getElementById('editor-type').value;
+    _editorState.type = type;
     const sel = document.getElementById('editor-item');
+    sel.innerHTML = '<option value="">Loading...</option>';
+    const endpoint = type === 'product' ? '/api/live/list' : '/api/blog/list';
+    const d = await api(endpoint, {body:{status:'any'}});
     sel.innerHTML = '';
-    const d = await api('/api/live/list', {body:{status:'any'}});
-    if (type === 'product'){
-        (d.products || []).forEach(p => {
-            const opt = document.createElement('option');
-            opt.value = p.id; opt.textContent = `#${p.id} — ${p.name}`;
-            sel.appendChild(opt);
-        });
+    if (!d.ok){
+        sel.innerHTML = '<option value="">(error)</option>';
+        document.getElementById('editor-load-status').textContent = '❌ ' + d.error;
+        return;
     }
+    const items = type === 'product' ? (d.products || []) : (d.posts || []);
+    if (!items.length){
+        sel.innerHTML = '<option value="">(no items)</option>';
+        document.getElementById('editor-load-status').textContent = '0 items';
+        return;
+    }
+    items.forEach(it => {
+        const opt = document.createElement('option');
+        opt.value = it.id;
+        opt.textContent = type === 'product' ? `#${it.id} — ${it.name}` : `#${it.id} — ${it.title}`;
+        sel.appendChild(opt);
+    });
+    document.getElementById('editor-load-status').textContent = `${items.length} items`;
 }
+
 async function loadEditorItem(){
+    const type = document.getElementById('editor-type').value;
     const id = document.getElementById('editor-item').value;
     if (!id) return;
-    const d = await api('/api/live/get', {body:{id}});
-    if (!d.ok){ toast(d.error, 'error'); return; }
-    document.getElementById('editor-form-card').classList.remove('hidden');
-    document.getElementById('editor-item-name').textContent = d.product.name;
-    document.getElementById('editor-title').value = d.product.name;
-    document.getElementById('editor-content').value = d.product.description || '';
-    document.getElementById('editor-meta-title').value = '';
-    document.getElementById('editor-meta-desc').value = '';
-    window._editorOriginal = d.product;
+    _editorState.type = type;
+    _editorState.id = parseInt(id);
+    _editorState.options = {categories:[], tags:[], attributes:[], brands:[]};
+    _editorState.categories = []; _editorState.tags = []; _editorState.brands = [];
+    _editorState.attributes = [];
+    _editorState.images = {featured: null, gallery: []};
+    document.getElementById('editor-load-status').textContent = 'Loading...';
+    showLoading('Loading ' + type + ' #' + _editorState.id + '...');
+    let d;
+    try {
+        d = await api('/api/editor/load', {body:{type, id: _editorState.id}});
+    } finally {
+        hideLoading();
+    }
+    if (!d.ok){
+        document.getElementById('editor-load-status').textContent = '❌ ' + d.error;
+        toast(d.error, 'error');
+        return;
+    }
+    _editorState.item = d.item;
+    _editorState.options = d.options || {categories:[], tags:[], attributes:[], brands:[]};
+    _editorState.focus_keyword = d.focus_keyword || '';
+    _editorState.original = JSON.parse(JSON.stringify(d.item));
+    document.getElementById('editor-load-status').textContent = '✅ Loaded';
+    if (type === 'product') renderProductEditor();
+    else renderPostEditor();
 }
-function previewDiff(){
-    const orig = window._editorOriginal || {};
-    const newTitle = document.getElementById('editor-title').value;
-    const newContent = document.getElementById('editor-content').value;
-    let out = '=== CHANGES ===\n\n';
-    if (orig.name !== newTitle) out += `Title:\n  OLD: ${orig.name}\n  NEW: ${newTitle}\n\n`;
-    if (orig.description !== newContent) out += `Content: CHANGED\n  Old length: ${(orig.description||'').length}\n  New length: ${newContent.length}\n\n`;
-    if (out === '=== CHANGES ===\n\n') out += 'No changes detected.';
-    document.getElementById('editor-diff-content').textContent = out;
-    document.getElementById('editor-diff-box').classList.remove('hidden');
+
+function renderProductEditor(){
+    const p = _editorState.item;
+    document.getElementById('editor-product-form').classList.remove('hidden');
+    document.getElementById('editor-post-form').classList.add('hidden');
+    document.getElementById('editor-empty-state').classList.add('hidden');
+    document.getElementById('prod-edit-name-display').textContent = p.name;
+    document.getElementById('prod-edit-id-display').textContent = `#${p.id}`;
+    document.getElementById('prod-edit-name').value = p.name || '';
+    document.getElementById('prod-edit-sku').value = p.sku || '';
+    document.getElementById('prod-edit-status').value = p.status || 'draft';
+    document.getElementById('prod-edit-regular-price').value = p.regular_price || '';
+    document.getElementById('prod-edit-sale-price').value = p.sale_price || '';
+    document.getElementById('prod-edit-stock').value = p.stock || 0;
+    document.getElementById('prod-edit-stock-status').value = p.stock_status || 'instock';
+    document.getElementById('prod-edit-manage-stock').checked = !!p.manage_stock;
+    document.getElementById('prod-edit-focus-kw').value = _editorState.focus_keyword || '';
+    document.getElementById('prod-edit-short-desc').value = p.short_description || '';
+    document.getElementById('prod-edit-desc').value = p.description || '';
+    _editorState.categories = (p.categories || []).map(c => ({id: c.id, name: c.name}));
+    _editorState.tags = (p.tags || []).map(t => ({id: t.id, name: t.name}));
+    _editorState.brands = [];
+    _editorState.attributes = (p.attributes || []).map(a => ({name: a.name, values: (a.options || []).join(', ')}));
+    _editorState.images = {featured: null, gallery: []};
+    if (p.images && p.images.length){
+        _editorState.images.featured = {id: p.images[0].id, src: p.images[0].src};
+        p.images.slice(1).forEach(img => _editorState.images.gallery.push({id: img.id, src: img.src}));
+    }
+    fillDatalist('categories-datalist', _editorState.options.categories || []);
+    fillDatalist('tags-datalist', _editorState.options.tags || []);
+    fillDatalist('brands-datalist', _editorState.options.brands || []);
+    renderChips('categories');
+    renderChips('tags');
+    renderChips('brand');
+    renderAttributes();
+    renderImagePreviews();
 }
-async function saveEditorChanges(){
-    const id = document.getElementById('editor-item').value;
-    if (!id){ toast('Select item', 'warning'); return; }
-    const d = await api('/api/live/update', {body:{
+
+function renderPostEditor(){
+    const p = _editorState.item;
+    document.getElementById('editor-post-form').classList.remove('hidden');
+    document.getElementById('editor-product-form').classList.add('hidden');
+    document.getElementById('editor-empty-state').classList.add('hidden');
+    document.getElementById('post-edit-title-display').textContent = p.title;
+    document.getElementById('post-edit-id-display').textContent = `#${p.id}`;
+    document.getElementById('post-edit-title').value = p.title || '';
+    document.getElementById('post-edit-slug').value = p.slug || '';
+    document.getElementById('post-edit-status').value = p.status || 'draft';
+    document.getElementById('post-edit-excerpt').value = stripHtml(p.excerpt || '');
+    document.getElementById('post-edit-focus-kw').value = _editorState.focus_keyword || '';
+    document.getElementById('post-edit-content').value = p.content || '';
+    const catOptions = _editorState.options.categories || [];
+    _editorState.categories = (p.categories || []).map(id => {
+        const c = catOptions.find(x => x.id === id);
+        return c ? {id: c.id, name: c.name} : {id, name: `Category #${id}`};
+    });
+    const tagOptions = _editorState.options.tags || [];
+    _editorState.tags = (p.tags || []).map(id => {
+        const t = tagOptions.find(x => x.id === id);
+        return t ? {id: t.id, name: t.name} : {id, name: `Tag #${id}`};
+    });
+    _editorState.brands = [];
+    _editorState.attributes = [];
+    _editorState.images = {featured: null, gallery: []};
+    if (p.featured_media && p.featured_media > 0){
+        _editorState.images.featured = {id: p.featured_media, src: ''};
+    }
+    fillDatalist('wp-categories-datalist', catOptions);
+    fillDatalist('wp-tags-datalist', tagOptions);
+    renderChips('categories');
+    renderChips('tags');
+    renderPostImagePreview();
+    if (_editorState.images.featured && _editorState.images.featured.id){
+        loadFeaturedMediaPreview();
+    }
+}
+
+function fillDatalist(id, items){
+    const dl = document.getElementById(id);
+    if (!dl) return;
+    dl.innerHTML = '';
+    items.forEach(it => {
+        const opt = document.createElement('option');
+        opt.value = it.name; opt.dataset.id = it.id;
+        dl.appendChild(opt);
+    });
+}
+
+function _editPrefix(){ return _editorState.type === 'product' ? 'prod-edit' : 'post-edit'; }
+
+function renderChips(kind){
+    const prefix = _editPrefix();
+    const container = document.getElementById(`${prefix}-${kind}-chips`);
+    if (!container) return;
+    const list = kind === 'categories' ? _editorState.categories
+              : kind === 'tags' ? _editorState.tags
+              : _editorState.brands;
+    container.innerHTML = '';
+    list.forEach(item => {
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        chip.innerHTML = `${item.name} <span class="chip-x" onclick="removeChip('${kind}', ${item.id})">×</span>`;
+        container.appendChild(chip);
+    });
+}
+
+function addChipFromInput(kind){
+    const prefix = _editPrefix();
+    const input = document.getElementById(`${prefix}-${kind}-input`);
+    if (!input) return;
+    const value = input.value.trim();
+    if (!value) return;
+    const options = kind === 'categories' ? (_editorState.options.categories || [])
+                  : kind === 'tags' ? (_editorState.options.tags || [])
+                  : (_editorState.options.brands || []);
+    const list = kind === 'categories' ? _editorState.categories
+              : kind === 'tags' ? _editorState.tags
+              : _editorState.brands;
+    const match = options.find(o => o.name.toLowerCase() === value.toLowerCase());
+    if (match){
+        if (!list.find(x => x.id === match.id)) list.push({id: match.id, name: match.name});
+        input.value = '';
+        renderChips(kind);
+    } else {
+        toast(`"${value}" not found. Create in Taxonomy Manager first.`, 'warning');
+    }
+}
+
+function removeChip(kind, id){
+    const list = kind === 'categories' ? _editorState.categories
+              : kind === 'tags' ? _editorState.tags
+              : _editorState.brands;
+    const idx = list.findIndex(x => x.id === id);
+    if (idx >= 0) list.splice(idx, 1);
+    renderChips(kind);
+}
+
+function renderAttributes(){
+    const container = document.getElementById('prod-edit-attributes-container');
+    container.innerHTML = '';
+    if (!_editorState.attributes.length){
+        container.innerHTML = '<p class="text-muted">No attributes.</p>';
+        return;
+    }
+    _editorState.attributes.forEach((attr, idx) => {
+        const row = document.createElement('div');
+        row.className = 'attr-row';
+        row.innerHTML = `<label style="min-width:100px;margin:0">${attr.name}</label>
+            <input type="text" value="${attr.values || ''}" placeholder="Values (comma-separated)"
+                   onchange="_editorState.attributes[${idx}].values = this.value">`;
+        container.appendChild(row);
+    });
+}
+
+function renderImagePreviews(){
+    const featBox = document.getElementById('prod-edit-featured-preview');
+    const featId = document.getElementById('prod-edit-featured-id');
+    if (_editorState.images.featured){
+        featBox.innerHTML = `<img src="${_editorState.images.featured.src}" style="width:100%;height:100%;object-fit:cover">`;
+        featId.textContent = `Media ID: ${_editorState.images.featured.id}`;
+    } else {
+        featBox.innerHTML = 'No image'; featId.textContent = '';
+    }
+    const galBox = document.getElementById('prod-edit-gallery-container');
+    galBox.innerHTML = '';
+    _editorState.images.gallery.forEach((img, idx) => {
+        const div = document.createElement('div');
+        div.className = 'image-thumb';
+        div.style.position = 'relative';
+        div.innerHTML = `<img src="${img.src}" style="width:100%;height:100%;object-fit:cover">
+            <span onclick="removeGalleryImage(${idx})" style="position:absolute;top:2px;right:2px;background:rgba(0,0,0,.7);color:#fff;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:14px">×</span>`;
+        galBox.appendChild(div);
+    });
+}
+
+function changeFeaturedImage(){
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = 'image/*';
+    input.onchange = async (e) => {
+        const file = e.target.files[0]; if (!file) return;
+        toast('Uploading...', 'info');
+        const fd = new FormData(); fd.append('file', file);
+        try {
+            const res = await fetch('/api/media/upload', {method:'POST', body:fd});
+            const d = await res.json();
+            if (d.ok){
+                _editorState.images.featured = {id: d.media_id, src: d.url};
+                renderImagePreviews(); toast('✅ Featured image updated');
+            } else toast(d.error, 'error');
+        } catch(e){ toast('Upload failed', 'error'); }
+    };
+    input.click();
+}
+
+function addGalleryImage(){
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = 'image/*'; input.multiple = true;
+    input.onchange = async (e) => {
+        const files = e.target.files; if (!files.length) return;
+        for (const file of files){
+            toast('Uploading...', 'info');
+            const fd = new FormData(); fd.append('file', file);
+            try {
+                const res = await fetch('/api/media/upload', {method:'POST', body:fd});
+                const d = await res.json();
+                if (d.ok){
+                    _editorState.images.gallery.push({id: d.media_id, src: d.url});
+                    renderImagePreviews(); toast('✅ Gallery image added');
+                } else toast(d.error, 'error');
+            } catch(e){ toast('Upload failed', 'error'); }
+        }
+    };
+    input.click();
+}
+
+function removeFeaturedImage(){ _editorState.images.featured = null; renderImagePreviews(); }
+function removeGalleryImage(idx){ _editorState.images.gallery.splice(idx, 1); renderImagePreviews(); }
+
+function previewProductChanges(){
+    const p = _editorState.original || {};
+    const changes = [];
+    const newName = document.getElementById('prod-edit-name').value;
+    if (newName !== (p.name || '')) changes.push(`Name: "${p.name}" → "${newName}"`);
+    const newPrice = document.getElementById('prod-edit-regular-price').value;
+    if (String(newPrice) !== String(p.regular_price || '')) changes.push(`Regular Price: ${p.regular_price} → ${newPrice}`);
+    const newStock = document.getElementById('prod-edit-stock').value;
+    if (String(newStock) !== String(p.stock || 0)) changes.push(`Stock: ${p.stock} → ${newStock}`);
+    const newDesc = document.getElementById('prod-edit-desc').value;
+    if (newDesc !== (p.description || '')) changes.push(`Description: changed`);
+    const origCats = (p.categories || []).map(c => c.id).sort().join(',');
+    const newCats = _editorState.categories.map(c => c.id).sort().join(',');
+    if (origCats !== newCats) changes.push(`Categories: changed`);
+    const origTags = (p.tags || []).map(t => t.id).sort().join(',');
+    const newTags = _editorState.tags.map(t => t.id).sort().join(',');
+    if (origTags !== newTags) changes.push(`Tags: changed`);
+    document.getElementById('product-diff-content').textContent = changes.length ? changes.join('\n\n') : 'No changes.';
+    document.getElementById('product-diff-box').classList.remove('hidden');
+}
+
+async function saveProductChanges(){
+    const id = _editorState.id; if (!id) return;
+    const payload = {
         id,
-        name: document.getElementById('editor-title').value,
-        description: document.getElementById('editor-content').value,
-    }});
-    if (d.ok){ toast('✅ Updated'); document.getElementById('editor-diff-box').classList.add('hidden'); }
-    else toast(d.error, 'error');
+        name: document.getElementById('prod-edit-name').value,
+        status: document.getElementById('prod-edit-status').value,
+        regular_price: document.getElementById('prod-edit-regular-price').value,
+        sale_price: document.getElementById('prod-edit-sale-price').value,
+        stock_quantity: document.getElementById('prod-edit-stock').value,
+        stock_status: document.getElementById('prod-edit-stock-status').value,
+        manage_stock: document.getElementById('prod-edit-manage-stock').checked,
+        short_description: document.getElementById('prod-edit-short-desc').value,
+        description: document.getElementById('prod-edit-desc').value,
+        focus_keyword: document.getElementById('prod-edit-focus-kw').value,
+        categories: _editorState.categories.map(c => ({id: c.id})),
+        tags: _editorState.tags.map(t => ({id: t.id})),
+        attributes: _editorState.attributes.map(a => ({
+            name: a.name,
+            options: (a.values || '').split(',').map(v => v.trim()).filter(v => v)
+        })),
+    };
+    const imgs = [];
+    if (_editorState.images.featured) imgs.push({id: _editorState.images.featured.id, position: 0});
+    _editorState.images.gallery.forEach((img, idx) => imgs.push({id: img.id, position: idx + 1}));
+    if (imgs.length) payload.images = imgs;
+    showLoading('Saving product...');
+    let d;
+    try {
+        d = await api('/api/editor/save-product', {body: payload});
+    } finally {
+        hideLoading();
+    }
+    if (d.ok){
+        toast('✅ Product saved');
+        _editorState.item = d.product;
+        _editorState.original = JSON.parse(JSON.stringify(d.product));
+        document.getElementById('product-diff-box').classList.add('hidden');
+    } else toast(d.error, 'error');
 }
-async function deleteEditorItem(){ toast('Use Live Products tab to delete', 'info'); }
+
+async function savePostChanges(){
+    const id = _editorState.id; if (!id) return;
+    const payload = {
+        id,
+        title: document.getElementById('post-edit-title').value,
+        slug: document.getElementById('post-edit-slug').value,
+        status: document.getElementById('post-edit-status').value,
+        excerpt: document.getElementById('post-edit-excerpt').value,
+        content: document.getElementById('post-edit-content').value,
+        focus_keyword: document.getElementById('post-edit-focus-kw').value,
+        categories: _editorState.categories.map(c => c.id),
+        tags: _editorState.tags.map(t => t.id),
+        featured_media: _editorState.images.featured ? _editorState.images.featured.id : 0,
+    };
+    showLoading('Saving post...');
+    let d;
+    try {
+        d = await api('/api/editor/save-post', {body: payload});
+    } finally {
+        hideLoading();
+    }
+    if (d.ok){
+        toast('✅ Post saved');
+        if (d.warning) toast(d.warning, 'warning', 6000);
+        _editorState.item = d.post;
+        _editorState.original = JSON.parse(JSON.stringify(d.post));
+        document.getElementById('post-diff-box').classList.add('hidden');
+    } else {
+        toast(d.error, 'error');
+    }
+}
+
+function stripHtml(html){ if (!html) return ''; const tmp = document.createElement('div'); tmp.innerHTML = html; return tmp.textContent || tmp.innerText || ''; }
+
+function renderPostImagePreview(){
+    const box = document.getElementById('post-edit-featured-preview');
+    const idBox = document.getElementById('post-edit-featured-id');
+    if (!box) return;
+    if (_editorState.images.featured){
+        const src = _editorState.images.featured.src;
+        if (src) box.innerHTML = `<img src="${src}" style="width:100%;height:100%;object-fit:cover">`;
+        else box.innerHTML = 'Loading...';
+        idBox.textContent = `Media ID: ${_editorState.images.featured.id}`;
+    } else {
+        box.innerHTML = 'No image';
+        idBox.textContent = '';
+    }
+}
+
+async function loadFeaturedMediaPreview(){
+    const mediaId = _editorState.images.featured ? _editorState.images.featured.id : null;
+    if (!mediaId) return;
+    const d = await api(`/api/media/${mediaId}`, {method:'GET'});
+    if (d.ok && d.url && _editorState.images.featured && _editorState.images.featured.id === mediaId){
+        _editorState.images.featured.src = d.url;
+        renderPostImagePreview();
+    }
+}
+
+function changePostFeaturedImage(){
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = 'image/*';
+    input.onchange = async (e) => {
+        const file = e.target.files[0]; if (!file) return;
+        toast('Uploading...', 'info');
+        const fd = new FormData(); fd.append('file', file);
+        try {
+            const res = await fetch('/api/media/upload', {method:'POST', body:fd});
+            const d = await res.json();
+            if (d.ok){
+                _editorState.images.featured = {id: d.media_id, src: d.url};
+                renderPostImagePreview();
+                toast('✅ Featured image updated');
+            } else toast(d.error, 'error');
+        } catch(e){ toast('Upload failed', 'error'); }
+    };
+    input.click();
+}
+
+function removePostFeaturedImage(){
+    _editorState.images.featured = null;
+    renderPostImagePreview();
+}
+
+function previewPostChanges(){
+    const p = _editorState.original || {};
+    const changes = [];
+    const newTitle = document.getElementById('post-edit-title').value;
+    if (newTitle !== (p.title || '')) changes.push(`Title: changed`);
+    const newSlug = document.getElementById('post-edit-slug').value;
+    if (newSlug !== (p.slug || '')) changes.push(`Slug: ${p.slug} → ${newSlug}`);
+    const newStatus = document.getElementById('post-edit-status').value;
+    if (newStatus !== (p.status || 'draft')) changes.push(`Status: ${p.status} → ${newStatus}`);
+    const newContent = document.getElementById('post-edit-content').value;
+    if (newContent !== (p.content || '')) changes.push(`Content: changed`);
+    const newExcerpt = document.getElementById('post-edit-excerpt').value;
+    if (newExcerpt !== stripHtml(p.excerpt || '')) changes.push(`Excerpt: changed`);
+    const origCats = (p.categories || []).sort().join(',');
+    const newCats = _editorState.categories.map(c => c.id).sort().join(',');
+    if (origCats !== newCats) changes.push(`Categories: changed`);
+    const origTags = (p.tags || []).sort().join(',');
+    const newTags = _editorState.tags.map(t => t.id).sort().join(',');
+    if (origTags !== newTags) changes.push(`Tags: changed`);
+    const origFeat = p.featured_media || 0;
+    const newFeat = _editorState.images.featured ? _editorState.images.featured.id : 0;
+    if (origFeat !== newFeat) changes.push(`Featured image: ${origFeat} → ${newFeat}`);
+    document.getElementById('post-diff-content').textContent = changes.length ? changes.join('\n\n') : 'No changes.';
+    document.getElementById('post-diff-box').classList.remove('hidden');
+}
+
+async function deleteCurrentItem(){
+    const type = _editorState.type;
+    const id = _editorState.id;
+    if (!id) return;
+    if (!confirm(`Delete this ${type}? Cannot be undone.`)) return;
+    const endpoint = type === 'product' ? '/api/live/delete' : '/api/blog/delete';
+    const d = await api(endpoint, {body:{id, force: true}});
+    if (d.ok){
+        toast('✅ Deleted');
+        _editorState.id = null; _editorState.item = null;
+        document.getElementById('editor-product-form').classList.add('hidden');
+        document.getElementById('editor-post-form').classList.add('hidden');
+        document.getElementById('editor-empty-state').classList.remove('hidden');
+        loadEditorList();
+    } else toast(d.error, 'error');
+}
 
 // ================================================================
 // TAB 12: EXPORT
@@ -2108,6 +3019,17 @@ async function clearLog(){
 // INIT
 // ================================================================
 window.addEventListener('load', async () => {
+    // Credential persistence — auto-restore first
+    try {
+        const remember = localStorage.getItem('remember_creds') !== 'false';
+        const cb = document.getElementById('remember-creds');
+        if (cb) cb.checked = remember;
+        if (remember) await autoRestoreCreds();
+        await checkSavedCreds();
+    } catch (e) {
+        console.warn('Credential persistence init failed', e);
+    }
+    
     const s = await api('/api/status', {method:'GET'});
     if (s.wp_connected) setStatus('WP ✓');
     if (s.wc_connected) setStatus('WC ✓');
@@ -2124,6 +3046,59 @@ window.addEventListener('load', async () => {
 # =============================================================================
 # SECTION 7 — PAGE ROUTE + ALL API ROUTES
 # =============================================================================
+# =============================================================================
+# SECTION 3.5 — CREDENTIAL PERSISTENCE (keyring)
+# =============================================================================
+KEYRING_SERVICE = "khan-herbal-factory"
+KEYRING_WP_KEY = "wp_credentials"
+KEYRING_WC_KEY = "wc_credentials"
+
+
+def save_credentials_to_keyring(wp_data=None, wc_data=None):
+    """Save credentials to Windows Credential Manager (encrypted by OS)."""
+    if not KEYRING_AVAILABLE:
+        return False, "keyring not installed"
+    try:
+        if wp_data:
+            keyring.set_password(KEYRING_SERVICE, KEYRING_WP_KEY, json.dumps(wp_data))
+        if wc_data:
+            keyring.set_password(KEYRING_SERVICE, KEYRING_WC_KEY, json.dumps(wc_data))
+        return True, ""
+    except Exception as e:
+        return False, str(e)[:150]
+
+
+def load_credentials_from_keyring():
+    """Load saved credentials. Returns (wp_data, wc_data) — either may be None."""
+    if not KEYRING_AVAILABLE:
+        return None, None
+    wp_data = wc_data = None
+    try:
+        raw = keyring.get_password(KEYRING_SERVICE, KEYRING_WP_KEY)
+        if raw:
+            wp_data = json.loads(raw)
+    except Exception:
+        pass
+    try:
+        raw = keyring.get_password(KEYRING_SERVICE, KEYRING_WC_KEY)
+        if raw:
+            wc_data = json.loads(raw)
+    except Exception:
+        pass
+    return wp_data, wc_data
+
+
+def clear_all_keyring():
+    """Delete all saved credentials."""
+    if not KEYRING_AVAILABLE:
+        return
+    for key in (KEYRING_WP_KEY, KEYRING_WC_KEY):
+        try:
+            keyring.delete_password(KEYRING_SERVICE, key)
+        except Exception:
+            pass
+
+
 @app.route("/")
 def index():
     html = f"""<!DOCTYPE html>
@@ -2153,6 +3128,91 @@ def api_status():
     })
 
 
+# ---------- CREDENTIAL PERSISTENCE ----------
+@app.route("/api/credentials/status", methods=["GET"])
+def api_credentials_status():
+    if not KEYRING_AVAILABLE:
+        return jsonify({
+            "ok": True,
+            "keyring_available": False,
+            "wp_saved": False, "wp_url": "",
+            "wc_saved": False, "wc_url": "",
+        })
+    wp_data, wc_data = load_credentials_from_keyring()
+    return jsonify({
+        "ok": True,
+        "keyring_available": True,
+        "wp_saved": bool(wp_data),
+        "wp_url": (wp_data or {}).get("url", ""),
+        "wp_user": (wp_data or {}).get("user", ""),
+        "wc_saved": bool(wc_data),
+        "wc_url": (wc_data or {}).get("url", ""),
+    })
+
+
+@app.route("/api/credentials/restore", methods=["POST"])
+def api_credentials_restore():
+    if not KEYRING_AVAILABLE:
+        return jsonify({"ok": False, "error": "keyring not installed"})
+    wp_data, wc_data = load_credentials_from_keyring()
+    if not wp_data and not wc_data:
+        return jsonify({"ok": False, "error": "No saved credentials"})
+    s = get_session_data()
+    results = {"wp": False, "wc": False, "wp_error": "", "wc_error": "", "wp_name": ""}
+
+    if wp_data:
+        try:
+            url = (wp_data.get("url") or "").rstrip("/")
+            user = wp_data.get("user") or ""
+            pw = wp_data.get("pass") or ""
+            if url and user and pw:
+                r = requests.get(f"{url}/wp-json/wp/v2/users/me",
+                                  auth=(user, pw), timeout=15)
+                if r.status_code == 200:
+                    s["wp"].update({"connected": True, "url": url,
+                                     "user": user, "pass": pw})
+                    results["wp"] = True
+                    results["wp_name"] = r.json().get("name", "?")
+                    log_activity("wp_auto_restore", "ok", f"user={results['wp_name']}")
+                else:
+                    results["wp_error"] = f"HTTP {r.status_code}"
+            else:
+                results["wp_error"] = "Incomplete saved data"
+        except Exception as e:
+            results["wp_error"] = str(e)[:100]
+
+    if wc_data:
+        try:
+            url = (wc_data.get("url") or "").rstrip("/")
+            ck = wc_data.get("ck") or ""
+            cs = wc_data.get("cs") or ""
+            if url and ck and cs:
+                r = requests.get(f"{url}/wp-json/wc/v3/system_status",
+                                  auth=(ck, cs), timeout=15)
+                if r.status_code == 200:
+                    s["wc"].update({"connected": True, "url": url,
+                                     "ck": ck, "cs": cs})
+                    results["wc"] = True
+                    log_activity("wc_auto_restore", "ok")
+                else:
+                    results["wc_error"] = f"HTTP {r.status_code}"
+            else:
+                results["wc_error"] = "Incomplete saved data"
+        except Exception as e:
+            results["wc_error"] = str(e)[:100]
+
+    return jsonify({"ok": True, **results})
+
+
+@app.route("/api/credentials/clear", methods=["POST"])
+def api_credentials_clear():
+    if not KEYRING_AVAILABLE:
+        return jsonify({"ok": False, "error": "keyring not installed"})
+    clear_all_keyring()
+    log_activity("credentials_clear", "ok")
+    return jsonify({"ok": True})
+
+
 # ---------- CONNECTIONS ----------
 @app.route("/api/connect/wp", methods=["POST"])
 def api_connect_wp():
@@ -2170,6 +3230,13 @@ def api_connect_wp():
         if r.status_code == 200:
             s["wp"].update({"connected": True, "url": url, "user": user, "pass": pw})
             name = r.json().get("name", "?")
+            # Auto-save credentials (if remember enabled)
+            try:
+                if KEYRING_AVAILABLE:
+                    save_credentials_to_keyring(
+                        wp_data={"url": url, "user": user, "pass": pw})
+            except Exception:
+                pass
             log_activity("wp_connect", "ok", f"user={name}")
             return jsonify({"ok": True, "message": f"Connected as {name}"})
         if r.status_code == 401:
@@ -2222,6 +3289,13 @@ def api_connect_wc():
         r = requests.get(f"{url}/wp-json/wc/v3/system_status", auth=(ck, cs), timeout=15)
         if r.status_code == 200:
             s["wc"].update({"connected": True, "url": url, "ck": ck, "cs": cs})
+            # Auto-save credentials (if remember enabled)
+            try:
+                if KEYRING_AVAILABLE:
+                    save_credentials_to_keyring(
+                        wc_data={"url": url, "ck": ck, "cs": cs})
+            except Exception:
+                pass
             log_activity("wc_connect", "ok")
             return jsonify({"ok": True, "message": "WooCommerce connected"})
         if r.status_code == 401:
@@ -2643,7 +3717,7 @@ def api_taxonomy_create():
     d = request.json or {}
     ok, item, err = taxonomy.create_one(
         s["wc"]["url"], s["wc"]["ck"], s["wc"]["cs"],
-        tax_type=d.get("type", "wc_categories"),
+        taxonomy_type=d.get("type", "wc_categories"),
         name=d.get("name", ""), slug=d.get("slug") or None,
         parent_id=d.get("parent_id", 0), description=d.get("description", ""),
     )
@@ -2661,7 +3735,7 @@ def api_taxonomy_delete():
     d = request.json or {}
     ok, err = taxonomy.delete_one(
         s["wc"]["url"], s["wc"]["ck"], s["wc"]["cs"],
-        tax_type=d.get("type", "wc_categories"),
+        taxonomy_type=d.get("type", "wc_categories"),
         item_id=d.get("id"),
     )
     if not ok: return jsonify({"ok": False, "error": err})
@@ -2695,6 +3769,53 @@ def api_og_product_auto():
         return jsonify({"ok": False, "error": "open_graph.py missing"})
     og = open_graph.auto_fill_og("product", p, s.get("og_global") or {})
     return jsonify({"ok": True, "og": og})
+
+
+@app.route("/api/og/product-get", methods=["POST"])
+def api_og_product_get():
+    s = get_session_data()
+    name = (request.json or {}).get("name", "")
+    if not name:
+        return jsonify({"ok": False, "error": "Name required"})
+    saved = (s.get("og_products") or {}).get(name)
+    if saved:
+        return jsonify({"ok": True, "og": saved, "source": "saved"})
+    p = next((x for x in s["built_products"] if x["name"] == name), None)
+    if not p:
+        return jsonify({"ok": True, "og": {}, "source": "auto"})
+    if CUSTOM_MODULES and open_graph:
+        og = open_graph.auto_fill_og("product", p, s.get("og_global") or {})
+    else:
+        og = {}
+    return jsonify({"ok": True, "og": og, "source": "auto"})
+
+
+@app.route("/api/og/product-save", methods=["POST"])
+def api_og_product_save():
+    s = get_session_data()
+    d = request.json or {}
+    name = d.get("name", "")
+    if not name:
+        return jsonify({"ok": False, "error": "Name required"})
+    s.setdefault("og_products", {})
+    s["og_products"][name] = {
+        "title": d.get("title", ""),
+        "description": d.get("description", ""),
+        "image": d.get("image", ""),
+    }
+    log_activity("og_product_save", "ok", f"name={name}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/og/product-reset", methods=["POST"])
+def api_og_product_reset():
+    s = get_session_data()
+    name = (request.json or {}).get("name", "")
+    if not name:
+        return jsonify({"ok": False, "error": "Name required"})
+    if "og_products" in s and name in s["og_products"]:
+        del s["og_products"][name]
+    return jsonify({"ok": True})
 
 
 @app.route("/api/og/generate-image", methods=["POST"])
@@ -2844,6 +3965,221 @@ def api_live_delete():
         d.get("id"), force=d.get("force", True))
     if not ok: return jsonify({"ok": False, "error": err})
     return jsonify({"ok": True})
+
+
+# ---------- MEDIA GET + TAXONOMY UPDATE ----------
+@app.route("/api/media/<int:media_id>", methods=["GET"])
+def api_media_get(media_id):
+    s = get_session_data()
+    if not s["wp"]["connected"]:
+        return jsonify({"ok": False, "error": "Connect WP first"})
+    try:
+        r = requests.get(
+            f"{s['wp']['url'].rstrip('/')}/wp-json/wp/v2/media/{media_id}",
+            auth=(s["wp"]["user"], s["wp"]["pass"]), timeout=15)
+        if r.status_code != 200:
+            return jsonify({"ok": False, "error": f"HTTP {r.status_code}"})
+        data = r.json()
+        return jsonify({"ok": True, "url": data.get("source_url", "")})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:100]})
+
+
+@app.route("/api/taxonomy/update", methods=["POST"])
+def api_taxonomy_update():
+    if not CUSTOM_MODULES or not taxonomy:
+        return jsonify({"ok": False, "error": "taxonomy.py missing"})
+    s = get_session_data()
+    if not s["wc"]["connected"]:
+        return jsonify({"ok": False, "error": "Connect WC first"})
+    d = request.json or {}
+    tax_type = d.get("type")
+    item_id = d.get("id")
+    if not item_id:
+        return jsonify({"ok": False, "error": "ID required"})
+    fields = {}
+    if "name" in d and d["name"]:
+        fields["name"] = d["name"]
+    if "slug" in d and d["slug"] is not None:
+        fields["slug"] = d["slug"]
+    if "description" in d and d["description"] is not None:
+        fields["description"] = d["description"]
+    if "parent_id" in d and tax_type in ("wc_categories", "wp_categories"):
+        try:
+            fields["parent"] = int(d["parent_id"]) if d["parent_id"] else 0
+        except Exception:
+            fields["parent"] = 0
+    if not fields:
+        return jsonify({"ok": False, "error": "No fields to update"})
+    ok, item, err = taxonomy.update_one(
+        s["wc"]["url"], s["wc"]["ck"], s["wc"]["cs"], tax_type, item_id, **fields)
+    if not ok:
+        return jsonify({"ok": False, "error": err})
+    log_activity("taxonomy_update", "ok", f"{tax_type} id={item_id}")
+    return jsonify({"ok": True, "item": item})
+
+
+# ---------- EDITOR DATA ----------
+@app.route("/api/editor/load", methods=["POST"])
+def api_editor_load():
+    s = get_session_data()
+    d = request.json or {}
+    item_type = d.get("type", "product")
+    item_id = d.get("id")
+    if not item_id:
+        return jsonify({"ok": False, "error": "Item ID required"})
+    if not CUSTOM_MODULES or not wp_client:
+        return jsonify({"ok": False, "error": "wp_client.py missing"})
+    if item_type == "product":
+        if not s["wc"]["connected"]:
+            return jsonify({"ok": False, "error": "Connect WC first"})
+        ok, result, err = wp_client.get_editor_data(
+            s["wp"]["url"], s["wp"]["user"], s["wp"]["pass"],
+            s["wc"]["url"], s["wc"]["ck"], s["wc"]["cs"],
+            item_type="product", item_id=item_id)
+    else:
+        if not s["wp"]["connected"]:
+            return jsonify({"ok": False, "error": "Connect WP first"})
+        wc_url = s["wc"]["url"] if s["wc"]["connected"] else s["wp"]["url"]
+        wc_ck = s["wc"]["ck"] if s["wc"]["connected"] else ""
+        wc_cs = s["wc"]["cs"] if s["wc"]["connected"] else ""
+        ok, result, err = wp_client.get_editor_data(
+            s["wp"]["url"], s["wp"]["user"], s["wp"]["pass"],
+            wc_url, wc_ck, wc_cs, item_type="post", item_id=item_id)
+    if not ok:
+        return jsonify({"ok": False, "error": err})
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/api/editor/save-product", methods=["POST"])
+def api_editor_save_product():
+    s = get_session_data()
+    if not s["wc"]["connected"]:
+        return jsonify({"ok": False, "error": "Connect WC first"})
+    if not CUSTOM_MODULES or not wp_client:
+        return jsonify({"ok": False, "error": "wp_client.py missing"})
+    d = request.json or {}
+    pid = d.get("id")
+    if not pid:
+        return jsonify({"ok": False, "error": "Product ID required"})
+    fields = {}
+    for k in ["name", "status", "description", "short_description",
+              "regular_price", "sale_price", "stock_status"]:
+        if k in d and d[k] is not None:
+            fields[k] = str(d[k]) if k in ("regular_price", "sale_price") else d[k]
+    if "stock_quantity" in d:
+        try: fields["stock_quantity"] = int(d["stock_quantity"])
+        except: fields["stock_quantity"] = 0
+    if "manage_stock" in d:
+        fields["manage_stock"] = bool(d["manage_stock"])
+    if "categories" in d:
+        fields["categories"] = [{"id": int(c["id"])} for c in d["categories"]]
+    if "tags" in d:
+        fields["tags"] = [{"id": int(t["id"])} for t in d["tags"]]
+    if "attributes" in d:
+        fields["attributes"] = [
+            {"name": a["name"], "options": a.get("options", []),
+             "visible": True, "variation": False}
+            for a in d["attributes"] if a.get("name")
+        ]
+    if "images" in d:
+        fields["images"] = d["images"]
+    if d.get("focus_keyword") is not None:
+        try:
+            ok_get, existing, _ = wp_client.get_product(
+                s["wc"]["url"], s["wc"]["ck"], s["wc"]["cs"], pid)
+            meta_data = list(existing.get("meta_data", []) or []) if ok_get else []
+            found = False
+            for m in meta_data:
+                if m.get("key") == "rank_math_focus_keyword":
+                    m["value"] = d["focus_keyword"]
+                    found = True
+                    break
+            if not found:
+                meta_data.append({"key": "rank_math_focus_keyword",
+                                   "value": d["focus_keyword"]})
+            fields["meta_data"] = meta_data
+        except Exception:
+            pass
+    ok, product, err = wp_client.update_product(
+        s["wc"]["url"], s["wc"]["ck"], s["wc"]["cs"], pid, **fields)
+    if not ok:
+        return jsonify({"ok": False, "error": err})
+    log_activity("editor_save_product", "ok", f"id={pid}")
+    return jsonify({"ok": True, "product": product})
+
+
+@app.route("/api/editor/save-post", methods=["POST"])
+def api_editor_save_post():
+    s = get_session_data()
+    if not s["wp"]["connected"]:
+        return jsonify({"ok": False, "error": "Connect WP first"})
+    if not CUSTOM_MODULES or not wp_client:
+        return jsonify({"ok": False, "error": "wp_client.py missing"})
+    d = request.json or {}
+    pid = d.get("id")
+    if not pid:
+        return jsonify({"ok": False, "error": "Post ID required"})
+    fields = {}
+    for k in ["title", "content", "status", "excerpt", "slug"]:
+        if k in d and d[k] is not None:
+            fields[k] = d[k]
+    if "categories" in d and isinstance(d["categories"], list):
+        try:
+            fields["categories"] = [int(x) for x in d["categories"] if x]
+        except Exception:
+            pass
+    if "tags" in d and isinstance(d["tags"], list):
+        try:
+            fields["tags"] = [int(x) for x in d["tags"] if x]
+        except Exception:
+            pass
+    if "featured_media" in d:
+        try:
+            fields["featured_media"] = int(d["featured_media"]) if d["featured_media"] else 0
+        except Exception:
+            fields["featured_media"] = 0
+    warning = ""
+    if "focus_keyword" in d and d["focus_keyword"] is not None:
+        fields["meta"] = {"rank_math_focus_keyword": d["focus_keyword"]}
+        warning = "Focus keyword sent via meta. If not saved, verify in WP Admin."
+    if not fields:
+        return jsonify({"ok": False, "error": "No fields to update"})
+    ok, post, err = wp_client.update_post(
+        s["wp"]["url"], s["wp"]["user"], s["wp"]["pass"], pid, **fields)
+    if not ok:
+        return jsonify({"ok": False, "error": err})
+    log_activity("editor_save_post", "ok", f"id={pid}")
+    return jsonify({"ok": True, "post": post, "warning": warning})
+
+
+@app.route("/api/media/upload", methods=["POST"])
+def api_media_upload():
+    s = get_session_data()
+    if not s["wp"]["connected"]:
+        return jsonify({"ok": False, "error": "Connect WP first"})
+    if not CUSTOM_MODULES or not media:
+        return jsonify({"ok": False, "error": "media.py missing"})
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "No file"})
+    file = request.files["file"]
+    raw_name = f"{uuid.uuid4().hex}_{file.filename}"
+    raw_path = UPLOAD_DIR / raw_name
+    file.save(str(raw_path))
+    try:
+        ok, final = media.process_image_pipeline(
+            str(raw_path), (1200, 1200), aspect="1:1", quality=82)
+        if not ok:
+            return jsonify({"ok": False, "error": final})
+        ok2, media_obj, err = media.upload_single_media(
+            s["wp"]["url"], s["wp"]["user"], s["wp"]["pass"],
+            final, filename=Path(raw_name).stem + ".webp")
+        if not ok2:
+            return jsonify({"ok": False, "error": err})
+        return jsonify({"ok": True, "media_id": media_obj["id"],
+                        "url": media_obj["source_url"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200]})
 
 
 # ---------- EXPORT ----------
